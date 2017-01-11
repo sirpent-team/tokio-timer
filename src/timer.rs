@@ -1,7 +1,7 @@
 use {Builder, wheel};
 use worker::Worker;
 use wheel::{Token, Wheel};
-use futures::{Future, Async, Poll};
+use futures::{Future, Stream, Async, Poll};
 use futures::task::{self, Task};
 use std::{fmt, io};
 use std::error::Error;
@@ -26,6 +26,11 @@ pub struct Timeout<T> {
     sleep: Sleep,
 }
 
+pub struct Anticipate<S> {
+    stream: Option<S>,
+    sleep: Sleep
+}
+
 /// The error type for timer operations.
 #[derive(Debug, Clone)]
 pub enum TimerError {
@@ -42,6 +47,8 @@ pub enum TimeoutError {
     Timer(TimerError),
     /// The operation timed out
     TimedOut,
+    /// The stream closed
+    StreamClosed,
 }
 
 pub fn build(builder: Builder) -> Timer {
@@ -79,6 +86,20 @@ impl Timer {
         Timeout {
             future: future,
             sleep: self.sleep(duration),
+        }
+    }
+
+    /// Attempt to read from the given stream for at much `duration` time.
+    ///
+    /// If the given stream provides a value within the given time, then the `Anticipate`
+    /// future will complete with that value and the stream. If `duration` expires,
+    /// the `Anticipate` future completes with an empty value and the stream.
+    pub fn anticipate<S, E>(&self, stream: S, duration: Duration) -> Anticipate<S>
+        where S: Stream<Error = E>,
+              E: From<TimeoutError>, {
+        Anticipate {
+            stream: Some(stream),
+            sleep: self.sleep(duration)
         }
     }
 }
@@ -233,6 +254,42 @@ impl<F, E> Future for Timeout<F>
 
 /*
  *
+ * ===== Anticipate ====
+ *
+ */
+
+impl<S, E> Future for Anticipate<S>
+    where S: Stream<Error = E>,
+          E: From<TimeoutError>,
+{
+    type Item = (Option<S::Item>, S);
+    type Error = E;
+
+    fn poll(&mut self) -> Poll<Self::Item, E> {
+        match self.stream.as_mut().unwrap().poll() {
+            Ok(Async::NotReady) => {},
+            Ok(Async::Ready(Some(item))) => {
+                // Pair of item and Stream to return.
+                let pair = (Some(item), self.stream.take().unwrap());
+                return Ok(Async::Ready(pair))
+            },
+            Ok(Async::Ready(None)) => {
+                // None indicates the Stream was closed so we have no stream to return.
+                return Err(TimeoutError::StreamClosed.into())
+            },
+            Err(e) => return Err(e)
+        }
+
+        match self.sleep.poll() {
+            Ok(Async::NotReady) => Ok(Async::NotReady),
+            Ok(Async::Ready(_)) => Err(TimeoutError::TimedOut.into()),
+            Err(e) => Err(TimeoutError::Timer(e).into()),
+        }
+    }
+}
+
+/*
+ *
  * ===== Errors =====
  *
  */
@@ -267,6 +324,7 @@ impl Error for TimeoutError {
             Timer(TooLong) => "requested timeout too long",
             Timer(NoCapacity) => "timer out of capacity",
             TimedOut => "the future timed out",
+            StreamClosed => "the stream closed unexpectedly",
         }
     }
 }
@@ -280,6 +338,7 @@ impl From<TimeoutError> for io::Error {
             Timer(TooLong) => io::Error::new(io::ErrorKind::InvalidInput, "requested timeout too long"),
             Timer(NoCapacity) => io::Error::new(io::ErrorKind::Other, "timer out of capacity"),
             TimedOut => io::Error::new(io::ErrorKind::TimedOut, "the future timed out"),
+            StreamClosed => io::Error::new(io::ErrorKind::UnexpectedEof, "the stream closed unexpectedly"),
         }
     }
 }
