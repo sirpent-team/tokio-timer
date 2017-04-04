@@ -12,5 +12,8 @@ Timer facilities for Tokio
 """
 
 [dependencies]
-futures = { git = "https://github.com/sirpent-team/futures-rs", branch = "master2" }
+futures = "0.1"
 slab = "0.3.0"
+
+[replace]
+"futures:0.1.12" = { git = "https://github.com/sirpent-team/futures-rs", branch = "master" }
